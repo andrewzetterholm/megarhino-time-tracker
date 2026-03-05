@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MegaRhino Time Tracker</title>
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX compilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #1a2236; min-height: 100vh; }
+    select, input, textarea, button { font-family: sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef } = React;
+
+
+// ── Brand Colors ──────────────────────────────────────────────
+const BRAND = {
+  navy:    "#1a2236",
+  navyMid: "#243048",
+  navyLight:"#2e3d5c",
+  orange:  "#f47c20",
+  orangeHover:"#e06a10",
+  white:   "#ffffff",
+  offWhite:"#f4f6fb",
+  gray:    "#8a95a8",
+  grayLight:"#dde3ed",
+  red:     "#e05252",
+  green:   "#3cb97a",
+};
+
+// ── Google Sheets Integration ─────────────────────────────────
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbxrLbFFZksd9sTEtCRIL82mqvGStrchhj5aCe1TABv8X_4pUQVRxlwbOu6_mnyV8wK4SA/exec";
+
+async function postToSheets(entry, startLabel, endLabel) {
+  const payload = {
+    submittedAt: entry.submittedAt,
+    timezone: entry.timezone,
+    teamMember: entry.teamMember,
+    date: entry.date,
+    startTime: entry.isPTO ? "N/A" : startLabel,
+    endTime: entry.isPTO ? "N/A" : endLabel,
+    durationMin: String(entry.endMin - entry.startMin),
+    ptoHours: entry.ptoHours || "",
+    entryType: entry.entryType,
+    category: entry.category,
+    taskType: entry.taskType || "",
+    notes: entry.notes,
+  };
+  console.log("Posting to Sheets:", payload);
+  try {
+    const res = await fetch(SHEETS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      body: new URLSearchParams(payload),
+    });
+    console.log("Sheets post response type:", res.type, res.status);
+  } catch (err) {
+    console.error("Sheets post failed:", err);
+  }
+}
+
+// ── Static Data ───────────────────────────────────────────────
+const DEFAULT_TEAM = [
+  "Andrew Zetterholm","CT Camat","Kristyl Lou Lisbos","Third Luz",
+  "Marlon Duan","Kara Jess Rondina","Fred Pereña","Bay Ann Sacayacay",
+  "Leonine Pereña","Carl de Mesa","Kenneth Ng","Ralph Asuncion",
+  "Camille Ann Gabutan","Mary Rose Sardido","June Cris Maghanoy",
+  "Yela Yengyengan","Lovely Mapanao","Ray-An Altobar",
+];
+
+const DEFAULT_CLIENTS = [
+  "GWTD","WH","HH","WW","ZP","Thai","EV","FGZ",
+  "TC","ZC","BG","HVS","FH","AS","OUB","YY",
+];
+
+const DEFAULT_TASKS = [
+  "Listing Optimization","Ads Management / PPC","Reporting",
+  "Account Health Monitoring","Customer Service / Reviews",
+  "Inventory Management","Competitor Research",
+  "Client Communication","Client Meeting","Onboarding","Internal Meetings",
+];
+
+const DEFAULT_PERSONAL = [
+  "Internal Meetings","Training / Learning","Admin / HR",
+  "Break","PTO / Sick","Other",
+];
+
+// ── Time Helpers ──────────────────────────────────────────────
+function generateTimeSlots() {
+  const slots = [];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 0; m < 60; m += 15) {
+      const hh = h % 12 === 0 ? 12 : h % 12;
+      const mm = m.toString().padStart(2, "0");
+      const ampm = h < 12 ? "AM" : "PM";
+      const label = `${hh}:${mm} ${ampm}`;
+      const minutes = h * 60 + m;
+      slots.push({ label, minutes });
+    }
+  }
+  return slots;
+}
+const TIME_SLOTS = generateTimeSlots();
+
+// Returns slots within a 3-hour lookback window up to current time
+// If selected date is today, filter. If past date, show all.
+function getStartSlots(selectedDate) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (selectedDate !== today) return TIME_SLOTS;
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const lookbackMinutes = currentMinutes - (3 * 60);
+  return TIME_SLOTS.filter(s => s.minutes >= Math.max(0, lookbackMinutes) && s.minutes <= currentMinutes);
+}
+
+function minutesToLabel(min) {
+  const slot = TIME_SLOTS.find(s => s.minutes === min);
+  return slot ? slot.label : "";
+}
+
+function getEndSlots(startMinutes) {
+  return TIME_SLOTS.filter(s => {
+    const diff = s.minutes - startMinutes;
+    return diff > 0 && diff <= 60;
+  });
+}
+
+function formatDuration(startMin, endMin) {
+  const diff = endMin - startMin;
+  if (diff <= 0) return "";
+  if (diff < 60) return `${diff} min`;
+  return "1 hr";
+}
+
+function formatDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+// Formats a YYYY-MM-DD date string without UTC timezone shift
+function formatDateStr(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+// Full weekday + date label for grouping headers
+function formatDateStrLong(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+}
+
+function formatTime(iso, tz) {
+  const d = new Date(iso);
+  const opts = { hour: "numeric", minute: "2-digit" };
+  if (tz) {
+    try {
+      return d.toLocaleTimeString("en-US", { ...opts, timeZone: tz, timeZoneName: "short" });
+    } catch {
+      // fallback if tz string is invalid
+    }
+  }
+  return d.toLocaleTimeString("en-US", opts);
+}
+
+// ── LocalStorage Helpers ──────────────────────────────────────
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+// ── CSV Export ────────────────────────────────────────────────
+function buildCSV(entries) {
+  const headers = ["Submitted At","Timezone","Team Member","Date","Start Time","End Time","Duration (min)","PTO Hours","Entry Type","Client / Category","Task Type","Notes"];
+  const rows = entries.map(e => [
+    e.submittedAt, e.timezone || "Unknown", e.teamMember,
+    formatDateStr(e.date),
+    e.isPTO ? "N/A" : minutesToLabel(e.startMin),
+    e.isPTO ? "N/A" : minutesToLabel(e.endMin),
+    e.isPTO ? Math.round(parseFloat(e.ptoHours) * 60) : (e.endMin - e.startMin),
+    e.isPTO ? e.ptoHours : "",
+    e.entryType, e.category, e.taskType || "", `"${(e.notes||"").replace(/"/g,'""')}"`
+  ]);
+  return [headers, ...rows].map(r => r.join(",")).join("\n");
+}
+
+// ── Inline "Add Custom" Dropdown ──────────────────────────────
+function CustomSelect({ options, value, onChange, placeholder, storageKey }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [newVal, setNewVal] = useState("");
+  const [allOptions, setAllOptions] = useState(() => {
+    const custom = lsGet(`custom_${storageKey}`, []);
+    return [...options, ...custom];
+  });
+
+  const handleAdd = () => {
+    const trimmed = newVal.trim();
+    if (!trimmed || allOptions.includes(trimmed)) { setShowAdd(false); setNewVal(""); return; }
+    const custom = lsGet(`custom_${storageKey}`, []);
+    const updated = [...custom, trimmed];
+    lsSet(`custom_${storageKey}`, updated);
+    const next = [...options, ...updated];
+    setAllOptions(next);
+    onChange(trimmed);
+    setShowAdd(false);
+    setNewVal("");
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <select
+        value={value}
+        onChange={e => { if (e.target.value === "__add__") setShowAdd(true); else onChange(e.target.value); }}
+        style={styles.select}
+      >
+        <option value="">{placeholder}</option>
+        {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
+        <option value="__add__">＋ Add new…</option>
+      </select>
+      {showAdd && (
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            autoFocus
+            value={newVal}
+            onChange={e => setNewVal(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") setShowAdd(false); }}
+            placeholder="Type new option…"
+            style={{ ...styles.input, flex: 1 }}
+          />
+          <button onClick={handleAdd} style={styles.btnSmallPrimary}>Add</button>
+          <button onClick={() => { setShowAdd(false); setNewVal(""); }} style={styles.btnSmallGhost}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────
+export default function App() {
+  const [screen, setScreen] = useState("splash"); // splash | main | history
+  const [teamMember, setTeamMember] = useState(() => lsGet("mr_team_member", ""));
+  const [entries, setEntries] = useState(() => lsGet("mr_entries", []));
+  const [form, setForm] = useState({ entryType: "client", category: "", taskType: "", startMin: "", endMin: "", notes: "", date: new Date().toISOString().slice(0,10) });
+  const [errors, setErrors] = useState({});
+  const [banner, setBanner] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [csvModal, setCsvModal] = useState(false);
+  const lastReminderRef = useRef(Date.now());
+  const bannerTimerRef = useRef(null);
+
+  // Hourly reminder
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastReminderRef.current >= 60 * 60 * 1000) {
+        setBanner(true);
+        lastReminderRef.current = now;
+      }
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-hide banner after 30s
+  useEffect(() => {
+    if (banner) {
+      bannerTimerRef.current = setTimeout(() => setBanner(false), 30000);
+      return () => clearTimeout(bannerTimerRef.current);
+    }
+  }, [banner]);
+
+  // Persist entries
+  useEffect(() => { lsSet("mr_entries", entries); }, [entries]);
+
+  const handleNameSelect = (name) => {
+    lsSet("mr_team_member", name);
+    setTeamMember(name);
+    setScreen("main");
+  };
+
+  const isPTO = form.entryType === "personal" && form.category === "PTO / Sick";
+
+  const validate = () => {
+    const e = {};
+    if (!form.date) e.date = "Required";
+    if (isPTO) {
+      if (!form.ptoHours) e.ptoHours = "Required";
+    } else {
+      if (form.startMin === "") e.startMin = "Required";
+      if (form.endMin === "") e.endMin = "Required";
+    }
+    if (!form.category) e.category = "Required";
+    if (form.entryType === "client" && !form.taskType) e.taskType = "Required";
+    if (!form.notes || form.notes.trim().length < 3) e.notes = "Please add a brief description";
+    return e;
+  };
+
+  const handleSubmit = () => {
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    const startMin = isPTO ? 0 : form.startMin;
+    const endMin   = isPTO ? Math.round(parseFloat(form.ptoHours) * 60) : form.endMin;
+    const entry = {
+      id: Date.now().toString(),
+      submittedAt: new Date().toISOString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      teamMember,
+      date: form.date,
+      startMin,
+      endMin,
+      isPTO: isPTO || false,
+      ptoHours: isPTO ? form.ptoHours : null,
+      entryType: form.entryType,
+      category: form.category,
+      taskType: form.taskType,
+      notes: form.notes,
+    };
+    setEntries(prev => [entry, ...prev]);
+    // Post to Google Sheets in background — failure is silent, localStorage is the backup
+    postToSheets(
+      entry,
+      minutesToLabel(entry.startMin),
+      minutesToLabel(entry.endMin)
+    );
+    setForm({ entryType: "client", category: "", taskType: "", startMin: "", endMin: "", ptoHours: "", notes: "", date: new Date().toISOString().slice(0,10) });
+    setErrors({});
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  const handleDelete = (id) => {
+    setEntries(prev => prev.filter(e => e.id !== id));
+    setDeleteConfirm(null);
+  };
+
+  const startSlots = getStartSlots(form.date);
+  const endSlots = form.startMin !== "" ? getEndSlots(form.startMin) : [];
+  const todayEntries = entries.filter(e => e.date === new Date().toISOString().slice(0,10));
+  const totalTodayMin = todayEntries.reduce((sum, e) => sum + (e.endMin - e.startMin), 0);
+
+  // ── SPLASH ────────────────────────────────────────────────
+  if (screen === "splash") {
+    return (
+      <div style={styles.splashWrap}>
+        <div style={styles.splashCard}>
+          <div style={styles.logoRow}>
+            <RhinoIcon size={48} />
+            <div>
+              <div style={styles.logoTitle}>MegaRhino</div>
+              <div style={styles.logoSub}>Time Tracker</div>
+            </div>
+          </div>
+          <p style={styles.splashHint}>Who are you? Select your name to begin.</p>
+          <div style={styles.nameGrid}>
+            {DEFAULT_TEAM.map(name => (
+              <button key={name} onClick={() => handleNameSelect(name)} style={styles.nameBtn}>
+                <span style={styles.nameInitial}>{name.charAt(0)}</span>
+                <span style={styles.nameFull}>{name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── HISTORY ───────────────────────────────────────────────
+  if (screen === "history") {
+    // Group entries by date, sorted newest first
+    const grouped = entries.reduce((acc, e) => {
+      if (!acc[e.date]) acc[e.date] = [];
+      acc[e.date].push(e);
+      return acc;
+    }, {});
+    const sortedDates = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+    const today = new Date().toISOString().slice(0, 10);
+
+    return (
+      <div style={styles.appWrap}>
+        <Header teamMember={teamMember} onExport={() => setCsvModal(true)} entryCount={entries.length} />
+        {banner && <Banner onDismiss={() => setBanner(false)} />}
+        <div style={styles.content}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+            <div>
+              <h2 style={styles.sectionTitle}>My Entries</h2>
+              <p style={styles.sectionSub}>{entries.length} total · {sortedDates.length} day{sortedDates.length !== 1 ? "s" : ""}</p>
+            </div>
+            <button onClick={() => setScreen("main")} style={styles.btnGhost}>← Log Time</button>
+          </div>
+          {entries.length === 0 ? (
+            <div style={styles.emptyState}>No entries yet. Start logging your time!</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+              {sortedDates.map(date => {
+                const dayEntries = grouped[date];
+                const dayMinutes = dayEntries.reduce((sum, e) => sum + (e.endMin - e.startMin), 0);
+                const isToday = date === today;
+                return (
+                  <div key={date}>
+                    {/* Day header */}
+                    <div style={styles.dayHeader}>
+                      <div style={styles.dayHeaderLeft}>
+                        <span style={styles.dayLabel}>
+                          {isToday ? "Today — " : ""}{formatDateStrLong(date)}
+                        </span>
+                      </div>
+                      <div style={styles.dayStats}>
+                        <span style={styles.dayStat}>{dayEntries.length} entr{dayEntries.length !== 1 ? "ies" : "y"}</span>
+                        <span style={styles.dayStatDivider}>·</span>
+                        <span style={styles.dayStat}>{Math.floor(dayMinutes/60)}h {dayMinutes%60}m logged</span>
+                      </div>
+                    </div>
+                    {/* Entries for this day */}
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {dayEntries.map(e => (
+                        <EntryCard key={e.id} entry={e} onDelete={() => setDeleteConfirm(e.id)} />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {deleteConfirm && (
+          <Modal onClose={() => setDeleteConfirm(null)}>
+            <p style={{ color: BRAND.white, marginBottom:16 }}>Delete this entry?</p>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => handleDelete(deleteConfirm)} style={styles.btnDanger}>Delete</button>
+              <button onClick={() => setDeleteConfirm(null)} style={styles.btnGhost}>Cancel</button>
+            </div>
+          </Modal>
+        )}
+        {csvModal && <CSVModal csv={buildCSV(entries)} onClose={() => setCsvModal(false)} />}
+      </div>
+    );
+  }
+
+  // ── MAIN ENTRY FORM ───────────────────────────────────────
+  return (
+    <div style={styles.appWrap}>
+      <Header teamMember={teamMember} onExport={() => setCsvModal(true)} entryCount={entries.length} />
+      {banner && <Banner onDismiss={() => setBanner(false)} />}
+      <div style={styles.content}>
+        {/* Today's summary strip */}
+        <div style={styles.summaryStrip}>
+          <div style={styles.summaryItem}>
+            <span style={styles.summaryNum}>{todayEntries.length}</span>
+            <span style={styles.summaryLabel}>entries today</span>
+          </div>
+          <div style={styles.summaryDivider} />
+          <div style={styles.summaryItem}>
+            <span style={styles.summaryNum}>{Math.floor(totalTodayMin/60)}h {totalTodayMin%60}m</span>
+            <span style={styles.summaryLabel}>logged today</span>
+          </div>
+          <div style={styles.summaryDivider} />
+          <button onClick={() => setScreen("history")} style={styles.summaryLink}>
+            View all entries →
+          </button>
+        </div>
+
+        {/* Form Card */}
+        <div style={styles.formCard}>
+          <h2 style={styles.formTitle}>Log Time Entry</h2>
+
+          {/* Date */}
+          <div style={styles.fieldGroup}>
+            <label style={styles.label}>Date</label>
+            <input
+              type="date"
+              value={form.date}
+              onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
+              style={{ ...styles.input, ...(errors.date ? styles.inputError : {}) }}
+            />
+            {errors.date && <span style={styles.errorMsg}>{errors.date}</span>}
+          </div>
+
+          {/* Start / End Time — hidden for PTO */}
+          {!isPTO && (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>Start Time</label>
+                <select
+                  value={form.startMin}
+                  onChange={e => setForm(f => ({ ...f, startMin: Number(e.target.value), endMin: "" }))}
+                  style={{ ...styles.select, ...(errors.startMin ? styles.inputError : {}) }}
+                >
+                  <option value="">Select…</option>
+                  {startSlots.map(s => <option key={s.minutes} value={s.minutes}>{s.label}</option>)}
+                </select>
+                {errors.startMin && <span style={styles.errorMsg}>{errors.startMin}</span>}
+              </div>
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>
+                  End Time
+                  {form.startMin !== "" && form.endMin !== "" && (
+                    <span style={styles.durationPill}>{formatDuration(form.startMin, form.endMin)}</span>
+                  )}
+                </label>
+                <select
+                  value={form.endMin}
+                  onChange={e => setForm(f => ({ ...f, endMin: Number(e.target.value) }))}
+                  disabled={form.startMin === ""}
+                  style={{ ...styles.select, ...(errors.endMin ? styles.inputError : {}), opacity: form.startMin === "" ? 0.5 : 1 }}
+                >
+                  <option value="">Select…</option>
+                  {endSlots.map(s => <option key={s.minutes} value={s.minutes}>{s.label}</option>)}
+                </select>
+                {errors.endMin && <span style={styles.errorMsg}>{errors.endMin}</span>}
+              </div>
+            </div>
+          )}
+
+          {/* PTO Hours selector — shown only for PTO / Sick */}
+          {isPTO && (
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>Total Hours</label>
+              <div style={styles.ptoHint}>Select the total hours of PTO or sick time for this date.</div>
+              <select
+                value={form.ptoHours}
+                onChange={e => setForm(f => ({ ...f, ptoHours: e.target.value }))}
+                style={{ ...styles.select, ...(errors.ptoHours ? styles.inputError : {}) }}
+              >
+                <option value="">Select hours…</option>
+                {[0.5,1,1.5,2,2.5,3,3.5,4,4.5,5,5.5,6,6.5,7,7.5,8].map(h => (
+                  <option key={h} value={h}>{h === 0.5 ? "30 min" : `${h} hr${h !== 1 ? "s" : ""}`}</option>
+                ))}
+              </select>
+              {errors.ptoHours && <span style={styles.errorMsg}>{errors.ptoHours}</span>}
+            </div>
+          )}
+
+          {/* Entry Type Toggle */}
+          <div style={styles.fieldGroup}>
+            <label style={styles.label}>Entry Type</label>
+            <div style={styles.toggleRow}>
+              <button
+                onClick={() => setForm(f => ({ ...f, entryType:"client", category:"", taskType:"" }))}
+                style={{ ...styles.toggleBtn, ...(form.entryType === "client" ? styles.toggleActive : styles.toggleInactive) }}
+              >Client Work</button>
+              <button
+                onClick={() => setForm(f => ({ ...f, entryType:"personal", category:"", taskType:"" }))}
+                style={{ ...styles.toggleBtn, ...(form.entryType === "personal" ? styles.toggleActive : styles.toggleInactive) }}
+              >Personal Time</button>
+            </div>
+          </div>
+
+          {/* Category */}
+          <div style={styles.fieldGroup}>
+            <label style={styles.label}>{form.entryType === "client" ? "Client" : "Personal Time Category"}</label>
+            <CustomSelect
+              key={form.entryType}
+              options={form.entryType === "client" ? DEFAULT_CLIENTS : DEFAULT_PERSONAL}
+              value={form.category}
+              onChange={v => setForm(f => ({ ...f, category: v }))}
+              placeholder={form.entryType === "client" ? "Select client…" : "Select category…"}
+              storageKey={form.entryType === "client" ? "clients" : "personal"}
+            />
+            {errors.category && <span style={styles.errorMsg}>{errors.category}</span>}
+          </div>
+
+          {/* Task Type (client only) */}
+          {form.entryType === "client" && (
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>Task Type</label>
+              <CustomSelect
+                options={DEFAULT_TASKS}
+                value={form.taskType}
+                onChange={v => setForm(f => ({ ...f, taskType: v }))}
+                placeholder="Select task…"
+                storageKey="tasks"
+              />
+              {errors.taskType && <span style={styles.errorMsg}>{errors.taskType}</span>}
+            </div>
+          )}
+
+          {/* Notes — Required */}
+          <div style={styles.fieldGroup}>
+            <label style={styles.label}>
+              Notes <span style={styles.notesRequired}>(Required)</span>
+            </label>
+            <div style={styles.notesHint}>Brief description — e.g. "optimized WH listings" or "PPC audit for ZP"</div>
+            <textarea
+              value={form.notes}
+              onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+              placeholder="What were you working on?"
+              rows={2}
+              style={{ ...styles.textarea, ...(errors.notes ? styles.inputError : {}) }}
+            />
+            {errors.notes && <span style={styles.errorMsg}>{errors.notes}</span>}
+          </div>
+
+          {/* Submit */}
+          <button onClick={handleSubmit} style={styles.btnPrimary}>
+            {saved ? "✓ Entry Saved!" : "Save Entry"}
+          </button>
+          {saved && <div style={styles.savedBanner}>✓ Entry saved locally and posted to Google Sheets.</div>}
+        </div>
+
+        {/* Recent entries preview */}
+        {todayEntries.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <h3 style={{ ...styles.sectionTitle, marginBottom: 12 }}>Today's Entries</h3>
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {todayEntries.slice(0,3).map(e => (
+                <EntryCard key={e.id} entry={e} compact onDelete={() => setDeleteConfirm(e.id)} />
+              ))}
+              {todayEntries.length > 3 && (
+                <button onClick={() => setScreen("history")} style={styles.viewMoreBtn}>
+                  View all {todayEntries.length} entries today →
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {deleteConfirm && (
+        <Modal onClose={() => setDeleteConfirm(null)}>
+          <p style={{ color: BRAND.white, marginBottom:16 }}>Delete this entry?</p>
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => handleDelete(deleteConfirm)} style={styles.btnDanger}>Delete</button>
+            <button onClick={() => setDeleteConfirm(null)} style={styles.btnGhost}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+      {csvModal && <CSVModal csv={buildCSV(entries)} onClose={() => setCsvModal(false)} />}
+    </div>
+  );
+}
+
+// ── Sub-Components ────────────────────────────────────────────
+
+function Header({ teamMember, onExport, entryCount }) {
+  return (
+    <div style={styles.header}>
+      <div style={styles.headerLeft}>
+        <RhinoIcon size={32} />
+        <div>
+          <div style={styles.headerTitle}>MegaRhino Time Tracker</div>
+          <div style={styles.headerSub}>Logged in as <strong style={{ color: BRAND.orange }}>{teamMember}</strong></div>
+        </div>
+      </div>
+      <div style={styles.headerRight}>
+        {entryCount > 0 && (
+          <button onClick={onExport} style={styles.btnHeaderExport} title="Export CSV">
+            ↓ Export CSV
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Banner({ onDismiss }) {
+  return (
+    <div style={styles.reminderBanner}>
+      <span style={styles.bannerIcon}>⏰</span>
+      <span style={styles.bannerText}>
+        <strong>Time to log!</strong> It's been about an hour — take a moment to record what you've been working on.
+      </span>
+      <button onClick={onDismiss} style={styles.bannerDismiss}>Dismiss</button>
+    </div>
+  );
+}
+
+function EntryCard({ entry, compact, onDelete }) {
+  const duration = entry.endMin - entry.startMin;
+  const isPTO = entry.isPTO;
+  const timeDisplay = isPTO
+    ? `PTO / Sick — ${entry.ptoHours} hr${entry.ptoHours != 1 ? "s" : ""}`
+    : `${minutesToLabel(entry.startMin)} – ${minutesToLabel(entry.endMin)}`;
+  const durationDisplay = isPTO
+    ? `${Math.round(duration / 60 * 10) / 10} hrs`
+    : `${duration} min`;
+
+  return (
+    <div style={{ ...styles.entryCard, ...(compact ? styles.entryCardCompact : {}) }}>
+      <div style={styles.entryCardLeft}>
+        <div style={styles.entryTimeRange}>
+          {timeDisplay}
+          <span style={styles.entryDurationBadge}>{durationDisplay}</span>
+        </div>
+        <div style={styles.entryMeta}>
+          <span style={{ ...styles.entryTypeBadge, background: entry.entryType === "client" ? BRAND.navyLight : "#3a2f5e" }}>
+            {entry.entryType === "client" ? "Client" : "Personal"}
+          </span>
+          <span style={styles.entryCat}>{entry.category}</span>
+          {entry.taskType && <span style={styles.entryTask}>· {entry.taskType}</span>}
+        </div>
+        {entry.notes && !compact && <div style={styles.entryNotes}>{entry.notes}</div>}
+        {entry.notes && compact && <div style={styles.entryNotes}>{entry.notes}</div>}
+        <div style={styles.entrySubmitted}>
+          Submitted {formatTime(entry.submittedAt, entry.timezone)}
+          {entry.timezone && <span style={styles.tzBadge}>{entry.timezone}</span>}
+        </div>
+      </div>
+      <button onClick={onDelete} style={styles.entryDelete} title="Delete">✕</button>
+    </div>
+  );
+}
+
+function Modal({ children, onClose }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modalCard} onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function CSVModal({ csv, onClose }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(csv).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }).catch(() => {
+      // fallback: select the textarea
+      const ta = document.getElementById("csv-textarea");
+      if (ta) { ta.select(); document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 2500); }
+    });
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modalCard, maxWidth: 580, width: "90%", maxHeight: "80vh", display: "flex", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div>
+            <div style={{ color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: "'Georgia', serif" }}>Export CSV Data</div>
+            <div style={{ color: BRAND.gray, fontSize: 12, marginTop: 2 }}>Copy the text below and paste into a .csv file or Google Sheet</div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: BRAND.gray, fontSize: 18, cursor: "pointer" }}>✕</button>
+        </div>
+        <textarea
+          id="csv-textarea"
+          readOnly
+          value={csv}
+          style={{
+            flex: 1, minHeight: 280, background: BRAND.navy, color: BRAND.offWhite,
+            border: `1px solid ${BRAND.navyLight}`, borderRadius: 8, padding: 12,
+            fontSize: 11, fontFamily: "monospace", resize: "none", outline: "none",
+            lineHeight: 1.5,
+          }}
+        />
+        <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+          <button onClick={handleCopy} style={{ ...styles.btnPrimary, flex: 1, padding: "11px 0" }}>
+            {copied ? "✓ Copied to clipboard!" : "Copy to Clipboard"}
+          </button>
+          <button onClick={onClose} style={styles.btnGhost}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RhinoIcon({ size = 36 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="24" cy="24" r="24" fill={BRAND.orange} />
+      <ellipse cx="24" cy="28" rx="12" ry="9" fill={BRAND.navy} />
+      <ellipse cx="24" cy="22" rx="10" ry="8" fill={BRAND.navyMid} />
+      <ellipse cx="21" cy="20" rx="3" ry="3.5" fill={BRAND.navy} />
+      <ellipse cx="27" cy="20" rx="3" ry="3.5" fill={BRAND.navy} />
+      <circle cx="21" cy="20" r="1.5" fill={BRAND.white} />
+      <circle cx="27" cy="20" r="1.5" fill={BRAND.white} />
+      <rect x="22" y="14" width="4" height="7" rx="2" fill={BRAND.orange} />
+      <rect x="23.5" y="12" width="1.5" height="5" rx="0.75" fill={BRAND.orangeHover} />
+    </svg>
+  );
+}
+
+// ── Styles ────────────────────────────────────────────────────
+const styles = {
+  splashWrap: {
+    minHeight: "100vh", background: BRAND.navy,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    padding: 20, fontFamily: "'Georgia', serif",
+  },
+  splashCard: {
+    background: BRAND.navyMid, borderRadius: 16, padding: "36px 32px",
+    maxWidth: 620, width: "100%",
+    boxShadow: "0 24px 60px rgba(0,0,0,0.5)",
+  },
+  logoRow: {
+    display: "flex", alignItems: "center", gap: 14, marginBottom: 8,
+  },
+  logoTitle: {
+    fontSize: 26, fontWeight: 700, color: BRAND.white, letterSpacing: "-0.5px",
+    fontFamily: "'Georgia', serif",
+  },
+  logoSub: {
+    fontSize: 13, color: BRAND.orange, fontFamily: "sans-serif",
+    textTransform: "uppercase", letterSpacing: 2,
+  },
+  splashHint: {
+    color: BRAND.gray, fontSize: 14, marginBottom: 20, fontFamily: "sans-serif",
+  },
+  nameGrid: {
+    display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10,
+  },
+  nameBtn: {
+    display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+    background: BRAND.navyLight, border: `1px solid ${BRAND.navyLight}`,
+    borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
+    color: BRAND.white, fontFamily: "sans-serif", fontSize: 13,
+    textAlign: "left",
+  },
+  nameInitial: {
+    width: 30, height: 30, borderRadius: "50%", background: BRAND.orange,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 13, fontWeight: 700, color: BRAND.white, flexShrink: 0,
+    lineHeight: "30px", textAlign: "center",
+  },
+  nameFull: { flex: 1 },
+
+  appWrap: {
+    minHeight: "100vh", background: BRAND.offWhite,
+    fontFamily: "sans-serif",
+  },
+  header: {
+    background: BRAND.navy, padding: "14px 24px",
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    boxShadow: "0 2px 12px rgba(0,0,0,0.3)",
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
+  headerTitle: { fontSize: 16, fontWeight: 700, color: BRAND.white, fontFamily: "'Georgia', serif" },
+  headerSub: { fontSize: 12, color: BRAND.gray },
+  headerRight: { display: "flex", gap: 8 },
+  btnHeaderExport: {
+    padding: "7px 14px", borderRadius: 8, border: `1px solid ${BRAND.orange}`,
+    background: "transparent", color: BRAND.orange, fontSize: 12,
+    cursor: "pointer", fontWeight: 600,
+  },
+  btnHeaderChange: {
+    padding: "7px 14px", borderRadius: 8, border: `1px solid ${BRAND.navyLight}`,
+    background: BRAND.navyLight, color: BRAND.gray, fontSize: 12, cursor: "pointer",
+  },
+
+  reminderBanner: {
+    background: BRAND.orange, padding: "12px 24px",
+    display: "flex", alignItems: "center", gap: 12,
+  },
+  bannerIcon: { fontSize: 20 },
+  bannerText: { flex: 1, fontSize: 14, color: BRAND.white },
+  bannerDismiss: {
+    padding: "5px 14px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.4)",
+    background: "transparent", color: BRAND.white, fontSize: 12, cursor: "pointer",
+  },
+
+  content: {
+    maxWidth: 640, margin: "0 auto", padding: "24px 20px",
+  },
+
+  summaryStrip: {
+    background: BRAND.navy, borderRadius: 12, padding: "14px 20px",
+    display: "flex", alignItems: "center", gap: 16, marginBottom: 20,
+  },
+  summaryItem: { display: "flex", flexDirection: "column", alignItems: "center" },
+  summaryNum: { fontSize: 22, fontWeight: 700, color: BRAND.orange },
+  summaryLabel: { fontSize: 11, color: BRAND.gray, textTransform: "uppercase", letterSpacing: 0.5 },
+  summaryDivider: { width: 1, height: 32, background: BRAND.navyLight },
+  summaryLink: {
+    background: "transparent", border: "none", color: BRAND.orange,
+    fontSize: 13, cursor: "pointer", fontWeight: 600, marginLeft: "auto",
+  },
+
+  formCard: {
+    background: BRAND.white, borderRadius: 14, padding: 24,
+    boxShadow: "0 4px 20px rgba(0,0,0,0.08)",
+    display: "flex", flexDirection: "column", gap: 16,
+  },
+  formTitle: {
+    fontSize: 18, fontWeight: 700, color: BRAND.navy,
+    fontFamily: "'Georgia', serif", margin: 0,
+  },
+  fieldGroup: { display: "flex", flexDirection: "column", gap: 6 },
+  label: { fontSize: 13, fontWeight: 600, color: BRAND.navy },
+  optional: { fontSize: 11, color: BRAND.gray, fontWeight: 400 },
+  notesRequired: { fontSize: 11, color: BRAND.orange, fontWeight: 600 },
+  notesHint: { fontSize: 11, color: BRAND.gray, marginBottom: 2, fontStyle: "italic" },
+  ptoHint: { fontSize: 11, color: BRAND.gray, marginBottom: 4, fontStyle: "italic" },
+  input: {
+    padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${BRAND.grayLight}`,
+    fontSize: 14, color: BRAND.navy, outline: "none", background: BRAND.offWhite,
+  },
+  inputError: { borderColor: BRAND.red },
+  select: {
+    padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${BRAND.grayLight}`,
+    fontSize: 14, color: BRAND.navy, outline: "none", background: BRAND.offWhite,
+    appearance: "auto",
+  },
+  textarea: {
+    padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${BRAND.grayLight}`,
+    fontSize: 14, color: BRAND.navy, outline: "none", background: BRAND.offWhite,
+    resize: "vertical", fontFamily: "sans-serif",
+  },
+  errorMsg: { fontSize: 11, color: BRAND.red },
+  durationPill: {
+    marginLeft: 8, fontSize: 11, background: BRAND.orange, color: BRAND.white,
+    padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+  },
+  toggleRow: { display: "flex", gap: 0, borderRadius: 8, overflow: "hidden", border: `1.5px solid ${BRAND.grayLight}` },
+  toggleBtn: { flex: 1, padding: "9px 0", fontSize: 13, fontWeight: 600, cursor: "pointer", border: "none", transition: "all 0.15s" },
+  toggleActive: { background: BRAND.navy, color: BRAND.white },
+  toggleInactive: { background: BRAND.white, color: BRAND.gray },
+
+  btnPrimary: {
+    padding: "13px 0", borderRadius: 10, border: "none",
+    background: BRAND.orange, color: BRAND.white, fontSize: 15,
+    fontWeight: 700, cursor: "pointer", width: "100%",
+    transition: "background 0.15s",
+  },
+  btnGhost: {
+    padding: "9px 16px", borderRadius: 8, border: `1.5px solid ${BRAND.grayLight}`,
+    background: "transparent", color: BRAND.navy, fontSize: 13,
+    fontWeight: 600, cursor: "pointer",
+  },
+  btnDanger: {
+    padding: "9px 16px", borderRadius: 8, border: "none",
+    background: BRAND.red, color: BRAND.white, fontSize: 13,
+    fontWeight: 600, cursor: "pointer",
+  },
+  btnSmallPrimary: {
+    padding: "8px 14px", borderRadius: 7, border: "none",
+    background: BRAND.orange, color: BRAND.white, fontSize: 12,
+    fontWeight: 600, cursor: "pointer",
+  },
+  btnSmallGhost: {
+    padding: "8px 12px", borderRadius: 7, border: `1px solid ${BRAND.grayLight}`,
+    background: "transparent", color: BRAND.gray, fontSize: 12, cursor: "pointer",
+  },
+  savedBanner: {
+    textAlign: "center", fontSize: 13, color: BRAND.green, fontWeight: 600,
+  },
+
+  sectionTitle: { fontSize: 16, fontWeight: 700, color: BRAND.navy, margin: 0, fontFamily: "'Georgia', serif" },
+  sectionSub: { fontSize: 13, color: BRAND.gray, margin: "2px 0 0" },
+  emptyState: {
+    textAlign: "center", color: BRAND.gray, padding: "40px 0", fontSize: 14,
+  },
+
+  entryCard: {
+    background: BRAND.white, borderRadius: 10, padding: "14px 16px",
+    display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.06)", gap: 10,
+  },
+  entryCardCompact: { padding: "10px 14px" },
+  entryCardLeft: { flex: 1 },
+  entryTimeRange: { fontSize: 14, fontWeight: 700, color: BRAND.navy, display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
+  entryDurationBadge: {
+    fontSize: 11, background: BRAND.orange, color: BRAND.white,
+    padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+  },
+  entryMeta: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  entryTypeBadge: {
+    fontSize: 11, color: BRAND.gray, padding: "2px 8px", borderRadius: 6, fontWeight: 600,
+  },
+  entryCat: { fontSize: 13, color: BRAND.navy, fontWeight: 600 },
+  entryTask: { fontSize: 13, color: BRAND.gray },
+  entryNotes: { fontSize: 12, color: BRAND.gray, marginTop: 6, fontStyle: "italic" },
+  entrySubmitted: { fontSize: 11, color: BRAND.grayLight, marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  tzBadge: {
+    fontSize: 10, background: BRAND.navyLight, color: BRAND.gray,
+    padding: "1px 6px", borderRadius: 4, fontFamily: "monospace",
+  },
+  entryDelete: {
+    background: "transparent", border: "none", color: BRAND.grayLight,
+    cursor: "pointer", fontSize: 14, padding: "2px 6px", flexShrink: 0,
+  },
+  dayHeader: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    borderBottom: `2px solid ${BRAND.navy}`, paddingBottom: 8, marginBottom: 10,
+  },
+  dayHeaderLeft: { flex: 1 },
+  dayLabel: { fontSize: 13, fontWeight: 700, color: BRAND.navy, fontFamily: "'Georgia', serif" },
+  dayStats: { display: "flex", alignItems: "center", gap: 6 },
+  dayStat: { fontSize: 12, color: BRAND.gray },
+  dayStatDivider: { color: BRAND.grayLight, fontSize: 12 },
+
+  viewMoreBtn: {
+    background: "transparent", border: `1px dashed ${BRAND.grayLight}`,
+    color: BRAND.gray, fontSize: 13, padding: "10px", borderRadius: 8,
+    cursor: "pointer", width: "100%", textAlign: "center",
+  },
+
+  modalOverlay: {
+    position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+    display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+  },
+  modalCard: {
+    background: BRAND.navyMid, borderRadius: 12, padding: 24,
+    minWidth: 280, boxShadow: "0 16px 40px rgba(0,0,0,0.5)",
+  },
+};
+
+
+    const domNode = document.getElementById('root');
+    const root = ReactDOM.createRoot(domNode);
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
